@@ -8,6 +8,9 @@
 !analysis.Rnw
 !references.bib
 
+# --- Compiled report (build output, tracked on request) ---
+!analysis.pdf
+
 # --- Proposal folder: keep folder reachable, ignore contents, ---
 # --- then track only the exported proposal PDF (no data, no .docx). ---
 !Proposal/
