@@ -1,0 +1,477 @@
+---
+title: "Financial Development and Income Classification: A Multivariate Analysis of 111 Economies"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+    fig_caption: true
+    latex_engine: pdflatex
+fontsize: 11pt
+geometry: "margin=1in"
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+  - \floatplacement{table}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+```
+
+```{r data-load}
+library(tidyverse)
+library(readxl)
+library(MASS)
+library(cluster)
+library(knitr)
+library(kableExtra)
+
+# The data file is an xlsx archive saved with a .csv extension.
+# Copy to a temp path with .xlsx suffix so read_excel recognises the format.
+tmp <- tempfile(fileext = ".xlsx")
+file.copy("Proposal/20220909-global-financial-development-database.csv", tmp)
+raw <- read_excel(tmp, sheet = "Data - August 2022")
+```
+
+```{r data-prep}
+vars23 <- c(
+  "di01","di02","di05","di08","di14",          # Depth (5)
+  "ai02","ai25",                                # Access (2)
+  "ei01","ei03","ei04","ei05","ei06",
+  "ei07","ei08","ei09","ei10",                  # Efficiency (9)
+  "si01","si04","si06",                         # Stability (3)
+  "oi01","oi02","oi13","oi14"                   # Other (4)
+)
+
+df2019 <- raw |>
+  filter(year == 2019) |>
+  dplyr::select(iso3, country, region, income, all_of(vars23)) |>
+  drop_na() |>
+  mutate(income = factor(income,
+    levels = c("High income", "Upper middle income",
+               "Lower middle income", "Low income")))
+
+# Standardised matrix (111 x 23)
+X      <- scale(as.matrix(df2019[, vars23]))
+income <- df2019$income
+
+# Consistent colour and shape scales used in all figures
+inc_labels <- c(
+  "High income"          = "High",
+  "Upper middle income"  = "Upper-Mid.",
+  "Lower middle income"  = "Lower-Mid.",
+  "Low income"           = "Low"
+)
+inc_colors <- c(
+  "High income"          = "#2166ac",
+  "Upper middle income"  = "#92c5de",
+  "Lower middle income"  = "#f4a582",
+  "Low income"           = "#d6604d"
+)
+inc_shapes <- c(
+  "High income"          = 16L,
+  "Upper middle income"  = 17L,
+  "Lower middle income"  = 15L,
+  "Low income"           = 18L
+)
+```
+
+```{r pca}
+pca     <- prcomp(X, scale. = FALSE)   # X is already standardised
+var_exp <- pca$sdev^2 / sum(pca$sdev^2)
+cum_var <- cumsum(var_exp)
+
+# Retain components with eigenvalue > 1 (Kaiser criterion)
+n_pc       <- sum(pca$sdev^2 > 1)
+scores_mat <- pca$x[, 1:n_pc, drop = FALSE]
+```
+
+```{r lda}
+lda_df    <- data.frame(scores_mat, income = income)
+prior_vec <- c(31, 35, 34, 11) / 111
+
+lda_fit    <- lda(income ~ ., data = lda_df, prior = prior_vec)
+lda_cv     <- lda(income ~ ., data = lda_df, prior = prior_vec, CV = TRUE)
+lda_scores <- predict(lda_fit)$x
+lda_acc    <- mean(lda_cv$class == income)
+lda_conf   <- table(True = income, Predicted = lda_cv$class)
+pct_ld     <- round(lda_fit$svd^2 / sum(lda_fit$svd^2) * 100, 1)
+
+# QDA for comparison (relaxes equal-covariance assumption)
+qda_cv  <- qda(income ~ ., data = lda_df, prior = prior_vec, CV = TRUE)
+qda_acc <- mean(qda_cv$class == income)
+```
+
+```{r assumptions}
+# Within-group Mahalanobis distances vs chi-squared(n_pc) quantiles
+pc_cols <- paste0("PC", 1:n_pc)
+mah_list <- lapply(levels(income), function(grp) {
+  sub  <- as.matrix(lda_df[lda_df$income == grp, pc_cols])
+  mah  <- mahalanobis(sub, colMeans(sub), cov(sub))
+  n    <- length(mah)
+  data.frame(income   = grp,
+             observed = sort(mah),
+             expected = qchisq(ppoints(n), df = n_pc))
+})
+mah_df <- do.call(rbind, mah_list)
+mah_df$income <- factor(mah_df$income, levels = levels(income))
+```
+
+```{r clustering}
+d   <- dist(X, method = "euclidean")
+hc  <- hclust(d, method = "ward.D2")
+k4  <- cutree(hc, k = 4)
+
+# Silhouette widths for k = 2 … 6
+sil_vals <- sapply(2:6, function(k) mean(silhouette(cutree(hc, k), d)[, 3]))
+sil_avg  <- sil_vals[3]   # k = 4 is the third element (k - 2 + 1)
+
+cluster_tab <- table(Cluster = k4, `Income group` = income)
+```
+
+```{r mds}
+mds    <- cmdscale(d, k = 2)
+mds_df <- data.frame(
+  D1     = mds[, 1],
+  D2     = mds[, 2],
+  iso3   = df2019$iso3,
+  income = income
+)
+```
+
+# Introduction
+
+The structure of global financial systems reflects deep-rooted differences in economic development, institutional quality, and growth trajectories. The World Bank classifies economies into income groups on the basis of per-capita GNI, yet financial development—measured across dimensions of depth, access, efficiency, and stability—is both a driver and a consequence of income. This report asks: *how well do financial development indicators characterise and differentiate economies at different income levels, and what latent structure underlies cross-country variation in financial systems?*
+
+Answering this question is not straightforward. Wealthier countries generally have deeper and more efficient financial sectors, but which specific dimensions most sharply distinguish income groups is not obvious from the literature alone. The 23 indicators used here also exhibit considerable internal correlation—depth variables (private credit, bank assets, liquid liabilities) capture closely related constructs, and before- and after-tax profitability ratios are near-collinear—making dimensionality reduction a natural first step before classification analysis.
+
+I address these issues with a four-stage multivariate pipeline: principal component analysis (PCA) to uncover the covariance structure; linear discriminant analysis (LDA) applied to PCA scores to assess income-group separability; hierarchical cluster analysis to identify natural groupings without imposing income labels; and classical multidimensional scaling (MDS) to map financial similarity across countries without assuming linearity.
+
+# Data
+
+The analysis uses the Global Financial Development Database (GFDD; World Bank, 2022), a widely cited panel covering over 200 economies from 1960 to 2021. The 2019 cross-section is chosen as the most recent pre-COVID year with strong data coverage. After selecting 23 indicators and removing economies with any missing value, the working dataset contains 111 countries, spanning all four World Bank income groups—High (31), Upper-Middle (35), Lower-Middle (34), and Low (11)—and all seven geographic regions.
+
+The 23 continuous indicators cover four theoretical dimensions. **Depth** (5 variables): private credit, deposit money bank assets, liquid liabilities, financial system deposits, and domestic credit to private sector (all % of GDP). **Access** (2 variables): bank branches and ATMs per 100,000 adults. **Efficiency** (9 variables): net interest margin, noninterest income share, overhead costs, return on assets and equity before and after tax, cost-to-income ratio, and credit to government/SOEs (all % of total assets or GDP). **Stability** (3 variables): bank Z-score, credit-to-deposits ratio, and liquid assets to deposits and short-term funding. Four additional "other" indicators capture bank concentration, bank deposits/GDP, remittances/GDP, and consolidated foreign claims/GDP.
+
+Variable scales differ substantially (Z-score: approximately 1–55; liquid liabilities: up to 600%+ of GDP), so all analyses use standardised data (mean zero, unit variance). The Low-income group's small sample (11 countries) is addressed in LDA by setting prior probabilities proportional to observed group frequencies. Table 1 presents summary statistics for all 23 indicators on the original scale.
+
+```{r tab-summary}
+dim_map <- c(
+  di01="Depth", di02="Depth", di05="Depth", di08="Depth", di14="Depth",
+  ai02="Access", ai25="Access",
+  ei01="Efficiency", ei03="Efficiency", ei04="Efficiency",
+  ei05="Efficiency", ei06="Efficiency", ei07="Efficiency",
+  ei08="Efficiency", ei09="Efficiency", ei10="Efficiency",
+  si01="Stability", si04="Stability", si06="Stability",
+  oi01="Other", oi02="Other", oi13="Other", oi14="Other"
+)
+desc_lab <- c(
+  di01="Private credit / GDP (%)",    di02="Bank assets / GDP (%)",
+  di05="Liquid liabilities / GDP (%)",di08="Financial deposits / GDP (%)",
+  di14="Domestic credit / GDP (%)",   ai02="Bank branches (per 100k adults)",
+  ai25="ATMs (per 100k adults)",      ei01="Net interest margin (%)",
+  ei03="Noninterest income / total (%)", ei04="Overhead costs / assets (%)",
+  ei05="ROA after tax (%)",           ei06="ROE after tax (%)",
+  ei07="Cost-to-income (%)",          ei08="Govt credit / GDP (%)",
+  ei09="ROA before tax (%)",          ei10="ROE before tax (%)",
+  si01="Bank Z-score",                si04="Credit / deposits (%)",
+  si06="Liquid assets / deposits (%)",oi01="Bank concentration (%)",
+  oi02="Bank deposits / GDP (%)",     oi13="Remittances / GDP (%)",
+  oi14="Foreign claims / GDP (%)"
+)
+
+raw_mat <- as.matrix(df2019[, vars23])
+desc_df <- data.frame(
+  Code      = vars23,
+  Dimension = dim_map[vars23],
+  Description = desc_lab[vars23],
+  Mean = round(colMeans(raw_mat), 2),
+  SD   = round(apply(raw_mat, 2, sd), 2),
+  Min  = round(apply(raw_mat, 2, min), 2),
+  Max  = round(apply(raw_mat, 2, max), 2),
+  row.names = NULL
+)
+
+kable(desc_df,
+      format   = "latex",
+      booktabs = TRUE,
+      caption  = "Summary statistics for the 23 financial development indicators (original, unstandardised scale; $n = 111$ countries, 2019).",
+      col.names = c("Code","Dimension","Description","Mean","SD","Min","Max"),
+      linesep  = "") |>
+  kable_styling(latex_options = c("hold_position","scale_down"),
+                font_size = 8)
+```
+
+# Methods
+
+**Principal Component Analysis.** PCA reduces the 23 standardised indicators to a smaller set of orthogonal components. Components are retained using the Kaiser criterion (eigenvalue $> 1$). A scree plot and biplot (PC1 vs. PC2) are used to assess variance captured and whether empirical components correspond to the four theoretical dimensions.
+
+**Linear Discriminant Analysis.** LDA is applied to the retained PCA scores rather than raw indicators, avoiding numerical instability from near-collinear variable pairs (ei05/ei09, ei06/ei10; the di01/di02/di05 cluster). Prior probabilities are proportional to observed group frequencies. LDA assumes approximate multivariate normality within groups and equal covariance matrices across groups. These assumptions are evaluated via within-group Mahalanobis distance Q-Q plots (compared to the $\chi^2$ distribution with degrees of freedom equal to the number of retained PCs), and by comparing LOOCV accuracy between LDA and quadratic discriminant analysis (QDA), which relaxes the equal-covariance assumption. Discriminant functions are visualised in an LD1–LD2 scatter plot.
+
+**Cluster Analysis.** Hierarchical clustering with Ward's minimum variance linkage is applied to the standardised 23-variable matrix. Average silhouette width over $k = 2, \ldots, 6$ guides the choice of cluster number. The resulting partition is cross-tabulated with World Bank income categories to identify countries whose financial profiles differ from their income-group label.
+
+**Multidimensional Scaling.** Classical MDS produces a two-dimensional map of pairwise Euclidean distances in the standardised 23-variable space. Unlike PCA, MDS imposes no linear structure and highlights outlier economies whose financial systems are atypical for their peer group.
+
+# Results
+
+## Principal Component Analysis
+
+```{r fig-scree, fig.cap="Scree plot (bars) and cumulative variance explained (line, right axis) for the 23-indicator PCA. The dashed horizontal line marks eigenvalue = 1 (Kaiser threshold).", fig.width=7, fig.height=3.4}
+scree_df <- data.frame(
+  PC         = seq_len(23),
+  Eigenvalue = pca$sdev^2,
+  CumVar     = cum_var
+)
+max_eig <- max(scree_df$Eigenvalue)
+
+ggplot(scree_df, aes(x = PC)) +
+  geom_col(aes(y = Eigenvalue), fill = "#4575b4", alpha = 0.75, width = 0.7) +
+  geom_line(aes(y = CumVar * max_eig), colour = "#d73027", linewidth = 0.9) +
+  geom_point(aes(y = CumVar * max_eig), colour = "#d73027", size = 2) +
+  geom_hline(yintercept = 1, linetype = "dashed", colour = "grey40") +
+  scale_y_continuous(
+    name     = "Eigenvalue",
+    sec.axis = sec_axis(~ . / max_eig, name = "Cumulative variance explained",
+                        labels = scales::percent_format(accuracy = 1))
+  ) +
+  scale_x_continuous(breaks = seq(1, 23, by = 2)) +
+  labs(x = "Principal component") +
+  theme_bw(base_size = 10)
+```
+
+```{r pca-text-numbers}
+n_pc_80 <- min(which(cum_var >= 0.80))
+```
+
+The scree plot (Figure 1) shows that `r n_pc` components have eigenvalues exceeding 1 and together account for `r round(cum_var[n_pc] * 100, 1)`% of total variance; these are retained for LDA. Table 1 reports loadings for the first four components. PC1 has large positive loadings on the depth variables (di01, di02, di05, di08, di14) and the access variables (ai02, ai25), capturing the overall scale of financial intermediation. PC2 contrasts efficiency indicators against depth, while higher components pick up stability and the "other" indicators.
+
+```{r tab-loadings}
+load_mat <- round(pca$rotation[, 1:4], 3)
+colnames(load_mat) <- paste0("PC", 1:4)
+
+kable(load_mat,
+      format    = "latex",
+      booktabs  = TRUE,
+      caption   = "PCA loadings for the first four components. Each entry is the correlation between the standardised indicator and the component score.",
+      linesep   = "") |>
+  kable_styling(latex_options = c("hold_position", "scale_down"),
+                font_size = 8)
+```
+
+```{r fig-biplot, fig.cap="Biplot of PC1 vs PC2. Country points are coloured by income group; arrows show variable loadings scaled to the score range. Depth and access variables (di*, ai*) cluster in the direction of high PC1, occupied predominantly by High-income economies.", fig.width=7, fig.height=5.2}
+scores_df <- as.data.frame(pca$x[, 1:2])
+scores_df$income <- income
+
+loads_df <- as.data.frame(pca$rotation[, 1:2])
+loads_df$variable <- rownames(loads_df)
+
+# Scale factor so arrows fill ~75% of the score range
+sf <- (max(abs(as.matrix(scores_df[, c("PC1","PC2")]))) /
+       max(abs(as.matrix(loads_df[, c("PC1","PC2")])))) * 0.75
+
+ggplot() +
+  geom_point(data  = scores_df,
+             aes(PC1, PC2, colour = income, shape = income),
+             size = 1.8, alpha = 0.85) +
+  geom_segment(data  = loads_df,
+               aes(x = 0, y = 0, xend = PC1 * sf, yend = PC2 * sf),
+               arrow     = arrow(length = unit(0.15, "cm")),
+               colour    = "grey55",
+               linewidth = 0.4) +
+  geom_text(data = loads_df,
+            aes(x = PC1 * sf * 1.12, y = PC2 * sf * 1.12, label = variable),
+            size = 2.2, colour = "grey30") +
+  scale_colour_manual(values = inc_colors, labels = inc_labels,
+                      name = "Income group") +
+  scale_shape_manual(values  = inc_shapes, labels = inc_labels,
+                     name = "Income group") +
+  labs(x = paste0("PC1 (", round(var_exp[1] * 100, 1), "%)"),
+       y = paste0("PC2 (", round(var_exp[2] * 100, 1), "%)")) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom",
+        legend.margin   = margin(t = -4))
+```
+
+The biplot (Figure 2) confirms that High-income economies cluster in the positive-PC1 direction, consistent with deeper and more accessible financial systems. Low-income economies occupy the opposite end, with Upper-Middle and Lower-Middle income groups arrayed between them. The efficiency variables spread more along PC2, indicating that operational efficiency varies partly independently of financial scale.
+
+## LDA Assumption Checking
+
+```{r fig-qqplot, fig.cap="Within-group Mahalanobis distance Q-Q plots for each income group (7 retained PC scores). Points should lie along the dashed reference line if the within-group distribution is multivariate normal ($\\chi^2$ with 7 degrees of freedom). Moderate departures in the tails are visible, most notably in the Low-income group (small $n = 11$).", fig.width=7, fig.height=4.5}
+ggplot(mah_df, aes(expected, observed)) +
+  geom_point(aes(colour = income), size = 1.5, alpha = 0.85) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey40") +
+  facet_wrap(~ income, scales = "free",
+             labeller = labeller(income = inc_labels)) +
+  scale_colour_manual(values = inc_colors, guide = "none") +
+  labs(x = paste0("Chi-squared quantiles (df = ", n_pc, ")"),
+       y = "Mahalanobis distance") +
+  theme_bw(base_size = 10)
+```
+
+Figure 3 plots the within-group Mahalanobis distances against $\chi^2_7$ quantiles for each income group. The three larger groups (High, Upper-Middle, Lower-Middle) follow the reference line reasonably well through the central range, with mild heavy-tail departures—a common pattern in real economic data. The Low-income group ($n = 11$) shows a steeper tail, likely a finite-sample artefact given the small group size. Overall, multivariate normality is approximately satisfied for the purposes of LDA.
+
+To assess the equal-covariance assumption, LDA and QDA are compared via LOOCV: LDA achieves `r round(lda_acc * 100, 1)`% and QDA achieves `r round(qda_acc * 100, 1)`%. The `r if (qda_acc > lda_acc + 0.02) "higher QDA accuracy suggests meaningful covariance heterogeneity across income groups" else "similar accuracies suggest that the equal-covariance assumption is not seriously violated"`, so `r if (qda_acc > lda_acc + 0.02) "QDA" else "LDA"` is retained for the main analysis.
+
+## Linear Discriminant Analysis
+
+```{r fig-lda, fig.cap="LDA scatter plot (LD1 vs LD2) for 111 countries, coloured by income group. Large triangles mark group centroids. LD1 accounts for the majority of between-group variance and separates income groups in the expected order.", fig.width=7, fig.height=4.8}
+ld_df <- data.frame(
+  LD1    = lda_scores[, 1],
+  LD2    = lda_scores[, 2],
+  income = income
+)
+centroids <- ld_df |>
+  group_by(income) |>
+  summarise(LD1 = mean(LD1), LD2 = mean(LD2), .groups = "drop")
+
+ggplot(ld_df, aes(LD1, LD2, colour = income, shape = income)) +
+  geom_point(size = 1.8, alpha = 0.80) +
+  geom_point(data   = centroids,
+             size   = 5, shape = 17, stroke = 1.1, alpha = 1) +
+  geom_text(data  = centroids,
+            aes(label = inc_labels[as.character(income)]),
+            vjust = -0.9, size = 2.8, fontface = "bold") +
+  scale_colour_manual(values = inc_colors, labels = inc_labels,
+                      name = "Income group") +
+  scale_shape_manual(values  = inc_shapes, labels = inc_labels,
+                     name = "Income group") +
+  labs(x = paste0("LD1 (", pct_ld[1], "%)"),
+       y = paste0("LD2 (", pct_ld[2], "%)")) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom",
+        legend.margin   = margin(t = -4))
+```
+
+LD1 accounts for `r pct_ld[1]`% of the between-group variance and separates income groups in the expected order—High-income economies at the positive end, Low-income at the negative end—mirroring the PC1 interpretation. LD2 (`r pct_ld[2]`% of between-group variance) provides additional separation within the middle-income groups.
+
+```{r tab-confusion}
+conf_df <- as.data.frame.matrix(lda_conf)
+rownames(conf_df) <- inc_labels[rownames(conf_df)]
+colnames(conf_df) <- inc_labels[colnames(conf_df)]
+
+kable(conf_df,
+      format   = "latex",
+      booktabs = TRUE,
+      caption  = paste0(
+        "LOOCV confusion matrix (rows = true income group, columns = predicted). ",
+        "Overall accuracy: ", round(lda_acc * 100, 1), "%."),
+      linesep  = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10) |>
+  add_header_above(c(" " = 1, "Predicted" = 4))
+```
+
+LOOCV classification accuracy is `r round(lda_acc * 100, 1)`% (Table 2), well above the naive baseline of `r round(max(table(income)) / 111 * 100, 1)`% (always predicting the most common group). Most misclassifications occur between adjacent income groups—Upper-Middle economies misclassified as High, or Lower-Middle as Upper-Middle—consistent with income groups representing a continuum of financial development rather than discrete categories.
+
+## Cluster Analysis
+
+```{r fig-silhouette, fig.cap="Average silhouette width for $k = 2, \\ldots, 6$ clusters (Ward's linkage). The maximum at $k = 3$ (red point) is largely driven by Hong Kong and Luxembourg forming an isolated two-country cluster of extreme financial centres; $k = 4$ is presented for substantive comparison with the income-group structure.", fig.width=5.5, fig.height=3.2}
+sil_df <- data.frame(k = 2:6, AvgSilhouette = sil_vals)
+
+ggplot(sil_df, aes(k, AvgSilhouette)) +
+  geom_line(colour = "#4575b4", linewidth = 1) +
+  geom_point(colour = "#4575b4", size = 3) +
+  geom_point(data = sil_df[which.max(sil_df$AvgSilhouette), ],
+             colour = "#d73027", size = 4.5) +
+  scale_x_continuous(breaks = 2:6) +
+  labs(x = "Number of clusters (k)", y = "Average silhouette width") +
+  theme_bw(base_size = 10)
+```
+
+The silhouette curve (Figure 3) peaks at $k = 3$ (avg = `r round(sil_vals[2], 3)`). Inspection reveals, however, that this solution groups all countries into two large blocs plus an isolated two-country cluster consisting solely of Hong Kong (HKG) and Luxembourg (LUX)—economies whose liquid liabilities and foreign claims are so large relative to GDP that they are extreme outliers in the standardised indicator space. The same two-country outlier cluster persists at $k = 4$ (Table 3 and Figure 4).
+
+The $k = 4$ solution (avg silhouette = `r round(sil_avg, 3)`) provides more substantive insight. Cluster 4 isolates HKG and LUX. Cluster 2 ($n = 17$) groups economies with advanced financial systems—predominantly High-income countries (Australia, Japan, Korea, the Netherlands, New Zealand) alongside several upper-middle income countries (Chile, Malaysia, Thailand) with comparably developed financial sectors. Clusters 1 ($n = 56$) and 3 ($n = 36$) partition the remaining economies, but with considerable income-group mixing across both: the income gradient distinguishes groups far better in the supervised LDA framework than in this unsupervised solution.
+
+```{r tab-cluster}
+kable(cluster_tab,
+      format   = "latex",
+      booktabs = TRUE,
+      caption  = paste0(
+        "Cross-tabulation of Ward's clusters ($k = 4$) and World Bank income groups. ",
+        "Average silhouette width = ", round(sil_avg, 3), "."),
+      linesep  = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+```{r fig-dendro, fig.cap="Ward's method dendrogram for 111 countries. Rectangles delimit the four-cluster solution. Countries are not individually labelled; the cross-tabulation in Table 3 describes the income composition of each cluster.", fig.width=8, fig.height=4.2}
+par(mar = c(2, 4, 0.5, 1), cex = 0.55)
+plot(hc,
+     labels  = FALSE,
+     main    = "",
+     xlab    = "",
+     sub     = "",
+     ylab    = "Height (Ward's linkage)",
+     hang    = -1)
+rect.hclust(hc, k = 4,
+            border = c("#2166ac", "#92c5de", "#f4a582", "#d6604d"))
+legend("topright",
+       legend = c("Cluster 1", "Cluster 2", "Cluster 3", "Cluster 4"),
+       fill   = c("#2166ac", "#92c5de", "#f4a582", "#d6604d"),
+       bty    = "n",
+       cex    = 0.75)
+```
+
+The dendrogram (Figure 4) shows that HKG and LUX (Cluster 4) merge last and at a large linkage height, confirming that their financial profiles are genuinely distant from all other economies. The remaining three clusters are separated at more moderate heights, consistent with the modest average silhouette width.
+
+## Multidimensional Scaling
+
+```{r fig-mds, fig.cap="Classical MDS map of 111 countries. ISO3 codes identify known financial centres and the most distant outlier within each income group. Colours indicate income group. The MDS broadly recapitulates the PCA and LDA orderings without imposing linear structure.", fig.width=7.5, fig.height=5.5}
+# Identify 3 outliers per income group (largest distance from group centroid)
+centroid_mds <- mds_df |>
+  group_by(income) |>
+  summarise(cD1 = mean(D1), cD2 = mean(D2), .groups = "drop")
+
+mds_df2 <- mds_df |>
+  left_join(centroid_mds, by = "income") |>
+  mutate(dist_c = sqrt((D1 - cD1)^2 + (D2 - cD2)^2))
+
+# Always label known financial centres; also label top outliers per group
+fc_iso   <- c("LUX", "HKG", "SGP", "CHE", "PAN", "MLT", "CYP", "JOR")
+top_out  <- mds_df2 |>
+  group_by(income) |>
+  slice_max(dist_c, n = 2) |>
+  ungroup()
+label_df <- bind_rows(top_out,
+                      mds_df2 |> filter(iso3 %in% fc_iso)) |>
+  distinct(iso3, .keep_all = TRUE)
+
+ggplot(mds_df2, aes(D1, D2, colour = income, shape = income)) +
+  geom_point(size = 1.8, alpha = 0.80) +
+  geom_text(data  = label_df,
+            aes(label = iso3),
+            size  = 2.2,
+            vjust = -0.85,
+            fontface = "italic") +
+  scale_colour_manual(values = inc_colors, labels = inc_labels,
+                      name = "Income group") +
+  scale_shape_manual(values  = inc_shapes, labels = inc_labels,
+                     name = "Income group") +
+  labs(x = "MDS Dimension 1", y = "MDS Dimension 2") +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom",
+        legend.margin   = margin(t = -4))
+```
+
+The MDS map (Figure 5) recapitulates the income-group structure identified in PCA and LDA, without imposing linearity. High-income economies form a relatively tight cluster in one region of the space, while Low-income economies are concentrated at the opposite end. Several financial centres—notably Luxembourg (LUX), Hong Kong (HKG), and Singapore (SGP)—appear as outliers within the High-income cluster owing to disproportionately large financial sectors relative to GDP, particularly in the depth variables. Some middle-income economies also deviate substantially from their group centroids, suggesting financial systems more developed or less developed than their per-capita income would imply.
+
+# Conclusions
+
+This analysis demonstrates that the 23 GFDD financial development indicators carry substantial information about income-group membership. The LOOCV classification accuracy of `r round(lda_acc * 100, 1)`%—compared with a `r round(max(table(income)) / 111 * 100, 1)`% naive baseline—confirms that income-group differences are systematically reflected in financial structure. The dominant axis of variation (PC1, and correspondingly LD1) captures financial depth and access, which increases monotonically from Low- to High-income economies. Efficiency indicators contribute secondary discrimination, especially between adjacent middle-income groups where depth-based separation is weaker.
+
+Cluster analysis reveals that the dominant source of heterogeneity is not the four-fold income-group structure but rather the extreme outlier status of Hong Kong and Luxembourg, whose financial sectors dwarf those of any comparable economy. Once these two countries are set aside, the remaining clusters align only loosely with income groups (avg silhouette = `r round(sil_avg, 3)` for $k = 4$), indicating that the income gradient is a continuum rather than a set of discrete financial regimes. This is consistent with the LDA confusion matrix: most misclassifications fall between adjacent income groups. The MDS map corroborates this picture, with HKG and LUX isolated far from the main body of High-income economies, and Singapore appearing as a more moderate outlier within the same income group.
+
+Several limitations apply. The 2019 cross-section provides a single snapshot; financial systems evolve, and results may differ in other years or following the COVID-19 shock. The 111-country sample excludes economies with missing indicators, which may disproportionately omit very small or fragile states. Future work could examine temporal trends, apply robust discriminant methods to handle heterogeneous within-group covariance, or extend the analysis to market-based financial indicators currently excluded from the working dataset.
+
+\newpage
+
+# Appendix: R Code
+
+All analysis was conducted in R (version `r R.version$major`.`r R.version$minor`). The code below reproduces every step from data loading to figure production.
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```

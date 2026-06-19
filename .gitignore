@@ -1,0 +1,15 @@
+# Track nothing by default — only the core files are re-included below.
+# (Deny-by-default keeps data, build output, and scratch scripts out.)
+*
+
+# --- Core source files (repo root) ---
+!.gitignore
+!analysis.Rmd
+!analysis.Rnw
+!references.bib
+
+# --- Proposal folder: keep folder reachable, ignore contents, ---
+# --- then track only the exported proposal PDF (no data, no .docx). ---
+!Proposal/
+Proposal/*
+!Proposal/proposal.pdf
