@@ -1,0 +1,363 @@
+---
+title: "Latent Structure of Financial Development Indicators: Exploratory and Confirmatory Factor Analysis"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+    fig_caption: true
+    latex_engine: pdflatex
+fontsize: 11pt
+geometry: "margin=1in"
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+  - \floatplacement{table}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+```
+
+```{r data-load}
+library(tidyverse)
+library(readxl)
+library(psych)
+library(lavaan)
+library(knitr)
+library(kableExtra)
+
+# The data file is an xlsx archive saved with a .csv extension.
+tmp <- tempfile(fileext = ".xlsx")
+invisible(file.copy("Proposal/20220909-global-financial-development-database.csv", tmp))
+raw <- read_excel(tmp, sheet = "Data - August 2022")
+```
+
+```{r data-prep}
+vars23 <- c(
+  "di01","di02","di05","di08","di14",          # Depth (5)
+  "ai02","ai25",                                # Access (2)
+  "ei01","ei03","ei04","ei05","ei06",
+  "ei07","ei08","ei09","ei10",                  # Efficiency (9)
+  "si01","si04","si06",                         # Stability (3)
+  "oi01","oi02","oi13","oi14"                   # Other (4)
+)
+
+df2019 <- raw |>
+  filter(year == 2019) |>
+  dplyr::select(iso3, country, region, income, all_of(vars23)) |>
+  drop_na()
+
+X <- scale(as.matrix(df2019[, vars23]))   # standardised 111 x 23
+
+desc_lab <- c(
+  di01="Private credit / GDP",        di02="Bank assets / GDP",
+  di05="Liquid liabilities / GDP",    di08="Financial deposits / GDP",
+  di14="Domestic credit / GDP",       ai02="Bank branches (per 100k)",
+  ai25="ATMs (per 100k)",             ei01="Net interest margin",
+  ei03="Noninterest income share",    ei04="Overhead costs / assets",
+  ei05="ROA after tax",               ei06="ROE after tax",
+  ei07="Cost-to-income",              ei08="Govt credit / GDP",
+  ei09="ROA before tax",              ei10="ROE before tax",
+  si01="Bank Z-score",                si04="Credit / deposits",
+  si06="Liquid assets / deposits",    oi01="Bank concentration",
+  oi02="Bank deposits / GDP",         oi13="Remittances / GDP",
+  oi14="Foreign claims / GDP"
+)
+```
+
+```{r factorability}
+R    <- cor(X)
+kmo  <- KMO(R)
+bart <- cortest.bartlett(R, n = nrow(X))
+
+# Near-duplicate indicator pairs (|r| > 0.9)
+hi  <- which(abs(R) > 0.9 & upper.tri(R), arr.ind = TRUE)
+dup_df <- data.frame(
+  `Indicator A` = paste0(rownames(R)[hi[, 1]], " (", desc_lab[rownames(R)[hi[, 1]]], ")"),
+  `Indicator B` = paste0(colnames(R)[hi[, 2]], " (", desc_lab[colnames(R)[hi[, 2]]], ")"),
+  r = round(R[hi], 3),
+  check.names = FALSE
+)
+dup_df <- dup_df[order(-dup_df$r), ]
+```
+
+```{r nfactors}
+# De-duplicate before EFA: drop the perfect duplicate oi02 (= di08) and the
+# before-tax profitability copies ei09 (= ei05), ei10 (= ei06).
+keep <- setdiff(vars23, c("oi02", "ei09", "ei10"))
+Xd   <- X[, keep]
+
+set.seed(1)
+# fa.parallel() and VSS() print to the console; capture and discard that output.
+invisible(capture.output({
+  pa  <- fa.parallel(Xd, fa = "fa", fm = "ml", plot = FALSE)
+  map <- VSS(Xd, n = 8, rotate = "oblimin", fm = "ml", plot = FALSE)
+}))
+n_map <- which.min(map$map)
+```
+
+```{r efa}
+efa <- fa(Xd, nfactors = 4, rotate = "oblimin", fm = "ml")
+
+# Tidy loading matrix for the heatmap / table (label by factor role)
+L <- unclass(loadings(efa))
+fac_names <- c(ML2 = "F1: Credit depth",
+               ML1 = "F2: Profitability",
+               ML3 = "F3: Liquidity/X-border",
+               ML4 = "F4: Cost (weak)")
+colnames(L) <- fac_names[colnames(L)]
+L <- L[, c("F1: Credit depth","F2: Profitability",
+           "F3: Liquidity/X-border","F4: Cost (weak)")]
+
+load_long <- as.data.frame(L) |>
+  rownames_to_column("ind") |>
+  pivot_longer(-ind, names_to = "Factor", values_to = "loading") |>
+  mutate(label = desc_lab[ind],
+         strong = abs(loading) >= 0.30)
+```
+
+```{r cfa}
+dfc <- as.data.frame(X)
+
+# Model A: literal theoretical four-factor congeneric model.
+modA <- '
+  Depth      =~ di01 + di02 + di05 + di08 + di14
+  Access     =~ ai02 + ai25
+  Efficiency =~ ei01 + ei03 + ei04 + ei05 + ei06 + ei07 + ei08
+  Stability  =~ si01 + si04 + si06
+'
+fitA      <- cfa(modA, data = dfc, std.lv = TRUE)
+A_conv    <- lavInspect(fitA, "converged")
+
+# Model B: respecified empirical model. Perfect duplicate oi02 removed; the
+# incoherent Stability indicators (si01 vs si06: r = -0.07) dropped; di05's
+# residual variance fixed to 0 (Heywood boundary from di05/di08 r = 0.93).
+modB <- '
+  Credit    =~ di01 + di02 + di14
+  Liquidity =~ di05 + di08 + oi14
+  Profit    =~ ei01 + ei04 + ei05 + ei06
+  Access    =~ ai02 + ai25
+  di05 ~~ 0*di05
+'
+fitB  <- cfa(modB, data = dfc, std.lv = TRUE)
+fmB   <- fitMeasures(fitB, c("chisq","df","pvalue","cfi","tli",
+                             "rmsea","rmsea.ci.lower","rmsea.ci.upper","srmr"))
+ssB   <- standardizedSolution(fitB)
+
+# Composite reliability (omega) and AVE per factor
+ldB <- ssB[ssB$op == "=~", ]
+rel_df <- ldB |>
+  group_by(Factor = lhs) |>
+  summarise(
+    Omega = sum(est.std)^2 / (sum(est.std)^2 + sum(1 - est.std^2)),
+    AVE   = mean(est.std^2),
+    .groups = "drop"
+  )
+```
+
+# Motivation
+
+The principal component analysis in the main report reduced the 23 GFDD
+indicators to orthogonal components for prediction, but it did not test the
+*theoretical* claim embedded in the data design: that the indicators measure
+four latent constructs—**Depth, Access, Efficiency, Stability**. PCA maximises
+variance and assumes no measurement model; it cannot tell us whether the
+proposed four-dimension taxonomy actually holds. This addendum addresses that
+question directly with exploratory factor analysis (EFA), which lets the data
+suggest a latent structure, and confirmatory factor analysis (CFA), which
+formally tests whether the theoretical measurement model fits.
+
+# Factorability and Redundancy
+
+```{r tab-dup}
+kable(dup_df,
+      format   = "latex",
+      booktabs = TRUE,
+      row.names = FALSE,
+      caption  = paste0("Near-duplicate indicator pairs ($|r| > 0.9$). ",
+                        "These collinearities dominate the covariance structure ",
+                        "and destabilise any measurement model that loads both ",
+                        "members of a pair on the same factor."),
+      linesep  = "") |>
+  kable_styling(latex_options = c("hold_position","scale_down"), font_size = 8)
+```
+
+The Kaiser–Meyer–Olkin measure of sampling adequacy is
+`r round(kmo$MSA, 2)` (mediocre but above the 0.60 threshold), and Bartlett's
+test of sphericity rejects the identity-correlation null
+($\chi^2 = `r round(bart$chisq)`$, $df = `r bart$df`$, $p < 0.001$), so the
+data are factorable. The dominant feature of the correlation matrix, however,
+is extreme redundancy: `r nrow(dup_df)` indicator pairs correlate above 0.9
+(Table 1), including a **perfect duplicate**—financial-system deposits (di08)
+and bank deposits (oi02) are identical ($r = 1.000$). Three credit measures
+(di01, di02, di14) are mutually correlated at $\approx 0.97$, and the
+before-/after-tax profitability pairs at $\geq 0.95$. Before the EFA, the
+perfect duplicate (oi02) and the before-tax profitability copies (ei09, ei10)
+are removed, leaving 20 indicators.
+
+# Exploratory Factor Analysis
+
+```{r fig-parallel, fig.cap="Parallel analysis. Solid line: eigenvalues from the 20-indicator factor solution; dashed line: 95th-percentile eigenvalues from random resampled data. Factors are retained where the observed eigenvalue exceeds the simulated benchmark.", fig.width=6.5, fig.height=3.4}
+pa_df <- data.frame(
+  Factor    = seq_along(pa$fa.values),
+  Observed  = pa$fa.values,
+  Simulated = pa$fa.sim
+)
+pa_df |>
+  pivot_longer(-Factor, names_to = "Type", values_to = "Eigenvalue") |>
+  ggplot(aes(Factor, Eigenvalue, colour = Type, linetype = Type)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.8) +
+  geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+  scale_colour_manual(values = c(Observed = "#2166ac", Simulated = "#d6604d")) +
+  scale_linetype_manual(values = c(Observed = "solid", Simulated = "dashed")) +
+  scale_x_continuous(breaks = seq(1, 20, 2)) +
+  labs(x = "Factor number", y = "Eigenvalue") +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom", legend.title = element_blank())
+```
+
+Parallel analysis retains **`r pa$nfact` factors** (the Velicer MAP criterion
+suggests `r n_map`); four factors are extracted to match the theoretical
+count. With oblimin (oblique) rotation—appropriate because financial
+dimensions are expected to correlate—the four factors explain
+`r round(efa$Vaccounted[3, 4] * 100)`% of the variance. The loading pattern
+(Figure 2) does **not** reproduce the theoretical Depth/Access/Efficiency/
+Stability blocks:
+
+```{r fig-efa, fig.cap="EFA loading heatmap (oblimin rotation, ML extraction). Cells show the loading of each indicator (rows) on each rotated factor (columns); values with $|\\lambda| \\geq 0.30$ are printed. The theoretical Depth block splits across two factors (Credit vs. Liquidity), Efficiency collapses to a Profitability factor, and the Access and Stability indicators load weakly everywhere.", fig.width=7, fig.height=6.5}
+ggplot(load_long, aes(Factor, fct_rev(paste0(ind, "  ", label)), fill = loading)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  geom_text(data = filter(load_long, strong),
+            aes(label = sprintf("%.2f", loading)), size = 2.6) +
+  scale_fill_gradient2(low = "#b2182b", mid = "white", high = "#2166ac",
+                       midpoint = 0, limits = c(-1, 1), name = "Loading") +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1),
+        panel.grid = element_blank())
+```
+
+- **F1 — Credit depth** loads private credit, bank assets and domestic credit
+  (di01, di02, di14), plus the credit-to-deposits ratio (si04).
+- **F2 — Profitability** loads net interest margin, overhead, and ROA/ROE
+  (ei01, ei04, ei05, ei06)—the coherent core of the theoretical Efficiency
+  block.
+- **F3 — Liquidity / cross-border** loads liquid liabilities, deposits and
+  foreign claims (di05, di08, oi14).
+- **F4** is a weak doublet (cost-to-income, noninterest income) explaining only
+  `r round(efa$Vaccounted[2, 4] * 100)`% of variance.
+
+Crucially, the theoretical **Depth** dimension is *not* unidimensional—it
+splits into a credit factor (F1) and a liquidity factor (F3). The
+theoretical **Efficiency** dimension reduces to **Profitability** (F2); its
+remaining indicators (noninterest income ei03, government credit ei08) are
+near-unique (communalities `r round(efa$communality["ei03"], 2)` and
+`r round(efa$communality["ei08"], 2)`). The **Access** indicators (ai02, ai25,
+communalities $\leq$ `r round(max(efa$communality[c("ai02","ai25")]), 2)`) and
+the **Stability** indicators (si01, si06) fail to form common factors at all.
+
+# Confirmatory Factor Analysis
+
+**Model A — the literal theoretical four-factor model** (Depth, Access,
+Efficiency, Stability) **fails to converge to an admissible solution**
+(`r if (!A_conv) "the optimiser does not reach a proper solution" else "converges"`):
+forcing the near-collinear depth indicators onto a single factor and the
+heterogeneous efficiency indicators (some negatively correlated) onto another
+produces Heywood cases. This non-convergence is itself the result—the proposed
+measurement model is empirically untenable as specified.
+
+**Model B — a respecified model** based on the EFA evidence (Credit,
+Liquidity, Profitability, Access; the incoherent Stability factor dropped, the
+perfect duplicate removed) converges to a proper solution with the fit in
+Table 2.
+
+```{r tab-cfa-fit}
+fit_tab <- data.frame(
+  Index = c("$\\chi^2$ (df)", "CFI", "TLI", "RMSEA [90% CI]", "SRMR"),
+  Value = c(
+    sprintf("%.1f (%d), p < 0.001", fmB["chisq"], fmB["df"]),
+    sprintf("%.3f", fmB["cfi"]),
+    sprintf("%.3f", fmB["tli"]),
+    sprintf("%.3f [%.3f, %.3f]", fmB["rmsea"], fmB["rmsea.ci.lower"], fmB["rmsea.ci.upper"]),
+    sprintf("%.3f", fmB["srmr"])
+  )
+)
+kable(fit_tab, format = "latex", booktabs = TRUE, row.names = FALSE,
+      escape = FALSE, col.names = c("Fit index", "Model B"),
+      caption = "CFA fit statistics for the respecified four-factor model (Model B).",
+      linesep = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+```{r tab-cfa-load}
+load_tab <- ldB |>
+  transmute(Factor = lhs,
+            Indicator = paste0(rhs, " (", desc_lab[rhs], ")"),
+            `Std. loading` = sprintf("%.2f", est.std))
+kable(load_tab, format = "latex", booktabs = TRUE, row.names = FALSE,
+      caption = "Model B standardised loadings. di05's residual variance is fixed at the Heywood boundary (0), so its loading is 1.00 by construction.",
+      linesep = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 9) |>
+  collapse_rows(columns = 1, latex_hline = "major")
+```
+
+```{r tab-rel}
+rel_print <- rel_df |>
+  mutate(Omega = sprintf("%.2f", Omega), AVE = sprintf("%.2f", AVE))
+kable(rel_print, format = "latex", booktabs = TRUE, row.names = FALSE,
+      col.names = c("Factor", "$\\omega$ (composite rel.)", "AVE"),
+      escape = FALSE,
+      caption = "Composite reliability and average variance extracted (AVE) per factor.",
+      linesep = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+Model B fits only moderately: CFI = `r sprintf("%.2f", fmB["cfi"])` and
+SRMR = `r sprintf("%.2f", fmB["srmr"])` are acceptable, but
+RMSEA = `r sprintf("%.2f", fmB["rmsea"])` remains high, indicating residual
+misspecification that no simple-structure model fully removes given the
+indicators' redundancy. The Credit and Liquidity factors are extremely
+reliable ($\omega \geq$ `r sprintf("%.2f", min(rel_df$Omega[rel_df$Factor %in% c("Credit","Liquidity")]))`)
+but this reflects near-duplicate indicators rather than rich measurement; the
+Access factor is weak ($\omega = `r sprintf("%.2f", rel_df$Omega[rel_df$Factor == "Access"])`$,
+AVE = `r sprintf("%.2f", rel_df$AVE[rel_df$Factor == "Access"])` $< 0.5$). The
+estimated factor correlations are substantial—Credit with Profitability
+`r sprintf("%.2f", ssB$est.std[ssB$lhs=="Credit" & ssB$rhs=="Profit"])`
+and Credit with Liquidity
+`r sprintf("%.2f", ssB$est.std[ssB$lhs=="Credit" & ssB$rhs=="Liquidity"])`—confirming
+the constructs are related facets of overall financial development rather than
+independent dimensions.
+
+# Conclusions
+
+Factor analysis revises the picture from the main report in three ways. First,
+the **four theoretical dimensions are not recovered empirically**: the literal
+measurement model is inadmissible (CFA Model A), and the EFA instead yields a
+credit factor, a liquidity factor and a profitability factor, with access and
+stability indicators failing to cohere. Second, **"Depth" is at least
+two-dimensional**—credit provision and deposit/liquidity scale are statistically
+distinct constructs that happen to correlate. Third, the database carries
+**substantial measurement redundancy** (a perfect duplicate plus seven further
+pairs above $|r| = 0.9$); pruning to one indicator per redundant cluster would
+yield a cleaner, more interpretable instrument of roughly 12–14 indicators
+without information loss.
+
+For the downstream analyses this implies that PCA scores (already orthogonal)
+remain the right input for LDA, but a parsimonious set of factor scores—Credit,
+Liquidity, Profitability—offers a more interpretable, theory-revising summary of
+cross-country financial structure than the four-fold taxonomy assumed at the
+outset.
+
+\newpage
+
+# Appendix: R Code
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```

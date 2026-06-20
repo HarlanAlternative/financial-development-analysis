@@ -6,10 +6,12 @@
 !.gitignore
 !analysis.Rmd
 !analysis.Rnw
+!factor-analysis.Rmd
 !references.bib
 
-# --- Compiled report (build output, tracked on request) ---
+# --- Compiled reports (build output, tracked on request) ---
 !analysis.pdf
+!factor-analysis.pdf
 
 # --- Proposal folder: keep folder reachable, ignore contents, ---
 # --- then track only the exported proposal PDF (no data, no .docx). ---
