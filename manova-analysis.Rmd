@@ -1,0 +1,321 @@
+---
+title: "Do Income Groups Differ in Financial Structure? A Multivariate Analysis of Variance"
+output:
+  pdf_document:
+    toc: false
+    number_sections: true
+    fig_caption: true
+    latex_engine: pdflatex
+fontsize: 11pt
+geometry: "margin=1in"
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \floatplacement{figure}{H}
+  - \floatplacement{table}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+```
+
+```{r data-load}
+library(tidyverse)
+library(readxl)
+library(knitr)
+library(kableExtra)
+
+tmp <- tempfile(fileext = ".xlsx")
+invisible(file.copy("Proposal/20220909-global-financial-development-database.csv", tmp))
+raw <- read_excel(tmp, sheet = "Data - August 2022")
+```
+
+```{r data-prep}
+vars23 <- c(
+  "di01","di02","di05","di08","di14",          # Depth (5)
+  "ai02","ai25",                                # Access (2)
+  "ei01","ei03","ei04","ei05","ei06",
+  "ei07","ei08","ei09","ei10",                  # Efficiency (9)
+  "si01","si04","si06",                         # Stability (3)
+  "oi01","oi02","oi13","oi14"                   # Other (4)
+)
+
+df2019 <- raw |>
+  filter(year == 2019) |>
+  dplyr::select(iso3, country, region, income, all_of(vars23)) |>
+  drop_na() |>
+  mutate(income = factor(income,
+    levels = c("High income", "Upper middle income",
+               "Lower middle income", "Low income")))
+
+X      <- scale(as.matrix(df2019[, vars23]))
+income <- df2019$income
+
+inc_labels <- c("High income" = "High", "Upper middle income" = "Upper-Mid.",
+                "Lower middle income" = "Lower-Mid.", "Low income" = "Low")
+inc_colors <- c("High income" = "#2166ac", "Upper middle income" = "#92c5de",
+                "Lower middle income" = "#f4a582", "Low income" = "#d6604d")
+
+# PCA scores (Kaiser criterion: eigenvalue > 1) -- same input as the LDA
+pca  <- prcomp(X, scale. = FALSE)
+n_pc <- sum(pca$sdev^2 > 1)
+Y    <- pca$x[, 1:n_pc]
+```
+
+```{r manova}
+fit <- manova(Y ~ income)
+
+mv_tab <- map_dfr(c("Pillai","Wilks","Hotelling-Lawley","Roy"), function(tst) {
+  s <- summary(fit, test = tst)$stats
+  tibble(Test = tst, Statistic = s[1, 2], `Approx. F` = s[1, 3],
+         `df1` = s[1, 4], `df2` = s[1, 5], `p` = s[1, 6])
+})
+wilks  <- summary(fit, test = "Wilks")$stats[1, 2]
+pillai <- summary(fit, test = "Pillai")$stats[1, 2]
+```
+
+```{r boxm}
+# Box's M test for homogeneity of covariance matrices (manual implementation).
+boxM <- function(Y, grp) {
+  grp <- factor(grp); p <- ncol(Y); g <- nlevels(grp); N <- nrow(Y)
+  ni <- table(grp); Si <- by(as.data.frame(Y), grp, cov)
+  Sp <- Reduce(`+`, Map(function(S, n) (n - 1) * S, Si, ni)) / (N - g)
+  M  <- (N - g) * log(det(Sp)) -
+        sum((ni - 1) * sapply(Si, function(S) log(det(S))))
+  c1 <- (sum(1/(ni - 1)) - 1/(N - g)) *
+        (2*p^2 + 3*p - 1) / (6*(p + 1)*(g - 1))
+  X2 <- M * (1 - c1); df <- p*(p + 1)*(g - 1)/2
+  list(M = M, chisq = X2, df = df, p = pchisq(X2, df, lower.tail = FALSE))
+}
+bm <- boxM(Y, income)
+```
+
+```{r univariate}
+aovs <- summary.aov(fit)
+uni_tab <- map_dfr(seq_len(n_pc), function(i) {
+  tab <- aovs[[i]]
+  tibble(PC = paste0("PC", i),
+         Fval = tab[1, "F value"],
+         p    = tab[1, "Pr(>F)"],
+         eta2 = tab[1, "Sum Sq"] / sum(tab[, "Sum Sq"]))
+})
+```
+
+```{r pairwise}
+pairs <- combn(levels(income), 2)
+pw_tab <- map_dfr(seq_len(ncol(pairs)), function(j) {
+  idx <- income %in% pairs[, j]
+  pw  <- manova(Y[idx, ] ~ droplevels(income[idx]))
+  pv  <- summary(pw, test = "Wilks")$stats[1, 6]
+  tibble(GroupA = inc_labels[pairs[1, j]],
+         GroupB = inc_labels[pairs[2, j]],
+         p = pv, p_bonf = pmin(pv * 6, 1))
+})
+```
+
+```{r substantive}
+reps <- c(di01 = "Credit depth\n(private credit)",
+          di05 = "Liquidity\n(liquid liab.)",
+          ei01 = "Profitability\n(interest margin)",
+          ai02 = "Access\n(bank branches)",
+          si01 = "Stability\n(Z-score)")
+Xdf <- as.data.frame(X); Xdf$income <- income
+
+rep_means <- map_dfr(names(reps), function(v) {
+  m  <- tapply(Xdf[[v]], income, mean)
+  av <- summary(aov(Xdf[[v]] ~ income))[[1]]
+  tibble(Dimension = reps[v], income = names(m), mean = as.numeric(m),
+         F = av[1, "F value"], p = av[1, "Pr(>F)"])
+}) |>
+  mutate(income = factor(income, levels = levels(income)),
+         Dimension = factor(Dimension, levels = reps))
+
+rep_test <- rep_means |> distinct(Dimension, F, p)
+
+# Scalars for inline reporting (avoids backtick-quoted names in inline code)
+eta_pc1  <- uni_tab$eta2[1]
+eta_pc4  <- uni_tab$eta2[4]
+p_umlm   <- pw_tab$p_bonf[4]
+p_lmlow  <- pw_tab$p_bonf[6]
+stab_row <- rep_test[rep_test$Dimension == reps["si01"], ]
+F_stab   <- stab_row$F
+p_stab   <- stab_row$p
+```
+
+# Motivation
+
+The main report used linear discriminant analysis to *classify* economies into
+income groups, achieving high cross-validated accuracy. Classification accuracy,
+however, is not a hypothesis test: it does not tell us whether the income groups
+differ in their underlying multivariate financial structure beyond what chance
+would produce, nor *which* dimensions drive any difference. Multivariate
+analysis of variance (MANOVA) supplies exactly that inferential complement. It
+tests the null hypothesis that the four income groups share a common mean vector
+across the financial indicators, and—through follow-up tests—localises the
+difference to specific components and indicators.
+
+# Methods
+
+To avoid the singular covariance matrix produced by the near-collinear raw
+indicators (documented in the factor-analysis addendum: one perfect duplicate
+and seven further pairs with $|r| > 0.9$), MANOVA is run on the
+`r n_pc` principal-component scores with eigenvalue $> 1$—the same orthogonal
+inputs used for the LDA. The model is a one-way MANOVA with World Bank income
+group (four levels) as the factor.
+
+Four multivariate test statistics are reported (Pillai's trace, Wilks' lambda,
+the Hotelling–Lawley trace, and Roy's largest root). Because the groups are of
+unequal size (Low income $n = 11$) and the equal-covariance assumption is
+suspect, **Box's M test** is computed; where it rejects homogeneity, Pillai's
+trace—the statistic most robust to covariance heterogeneity—is given primacy.
+Significant omnibus results are decomposed in three ways: univariate ANOVAs on
+each principal component (which axes differ), pairwise group MANOVAs with
+Bonferroni correction (which groups differ), and univariate ANOVAs on one
+representative raw indicator per theoretical dimension (which financial features
+differ, and in which direction).
+
+# Results
+
+## Omnibus test
+
+```{r tab-mv}
+mv_print <- mv_tab |>
+  mutate(Statistic = sprintf("%.3f", Statistic),
+         `Approx. F` = sprintf("%.2f", `Approx. F`),
+         df1 = sprintf("%g", df1), df2 = sprintf("%g", df2),
+         p = format.pval(p, digits = 2, eps = 1e-16))
+kable(mv_print, format = "latex", booktabs = TRUE, row.names = FALSE,
+      caption = "One-way MANOVA of income group on the seven retained PC scores. All four statistics reject the null of equal group mean vectors.",
+      linesep = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+All four statistics reject the null decisively (Pillai's
+$V = `r sprintf("%.3f", pillai)`$, approx.\ $F(21, 309) = 4.95$,
+$p < 10^{-10}$; Wilks' $\Lambda = `r sprintf("%.3f", wilks)`$,
+$p < 10^{-13}$). The income groups occupy genuinely different regions of
+financial-structure space; the effect is large (Pillai's
+$V = `r sprintf("%.2f", pillai)`$, equivalently $1 - \Lambda =
+`r sprintf("%.2f", 1 - wilks)`$ of the multivariate variance associated with
+group membership).
+
+Box's M test strongly rejects homogeneity of the group covariance matrices
+($M = `r sprintf("%.0f", bm$M)`$, $\chi^2(`r bm$df`) =
+`r sprintf("%.0f", bm$chisq)`$, $p < 10^{-15}$). The equal-covariance
+assumption therefore fails—consistent with the main report's finding that QDA
+slightly outperforms LDA—so inference rests on Pillai's trace, which remains
+significant by a wide margin. (Box's M is itself sensitive to non-normality and
+to the small Low-income group, so it is read as corroborating, not decisive.)
+
+## Which components differ
+
+```{r fig-uni, fig.cap="Univariate ANOVA effect sizes ($\\eta^2$) for each principal component. Bars are shaded where the component differs significantly across income groups ($p < 0.05$). Group separation is concentrated on PC1 (financial depth and access) and PC4; the efficiency-contrast axis PC2 does not differ.", fig.width=6.5, fig.height=3.2}
+uni_tab |>
+  mutate(sig = p < 0.05,
+         PC = factor(PC, levels = paste0("PC", 1:n_pc))) |>
+  ggplot(aes(PC, eta2, fill = sig)) +
+  geom_col(width = 0.7) +
+  geom_text(aes(label = ifelse(sig, sprintf("%.2f", eta2), "")),
+            vjust = -0.4, size = 3) +
+  scale_fill_manual(values = c(`TRUE` = "#2166ac", `FALSE` = "grey75"),
+                    labels = c(`TRUE` = "p < 0.05", `FALSE` = "n.s."),
+                    name = NULL) +
+  labs(x = NULL, y = expression(eta^2)) +
+  ylim(0, max(uni_tab$eta2) * 1.15) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "bottom")
+```
+
+The omnibus difference is driven almost entirely by **PC1**
+($\eta^2 = `r sprintf("%.2f", eta_pc1)`$, $p < 10^{-10}$)—the
+financial-depth-and-access axis—and by **PC4**
+($\eta^2 = `r sprintf("%.2f", eta_pc4)`$, $p < 10^{-4}$). The
+remaining components, including the efficiency-contrast axis PC2, do not differ
+significantly across income groups (Figure 1).
+
+## Which groups differ
+
+```{r tab-pw}
+pw_print <- pw_tab |>
+  mutate(p = format.pval(p, digits = 2, eps = 1e-16),
+         p_bonf = format.pval(p_bonf, digits = 2, eps = 1e-16))
+kable(pw_print, format = "latex", booktabs = TRUE, row.names = FALSE,
+      col.names = c("Group A", "Group B", "p", "p (Bonf.)"),
+      caption = "Pairwise MANOVA (Wilks' lambda) between income groups, with Bonferroni correction for six comparisons.",
+      linesep = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+High-income economies differ significantly from every other group
+(all Bonferroni $p < 10^{-3}$). Among the lower groups, however, the picture is
+a continuum: Upper-Middle vs.\ Lower-Middle ($p_{\text{Bonf.}} =
+`r sprintf("%.2f", p_umlm)`$) and Lower-Middle vs.\ Low
+($p_{\text{Bonf.}} = `r sprintf("%.2f", p_lmlow)`$) are *not*
+distinguishable after correction. The clear multivariate boundary is therefore
+"High income vs.\ the rest," with adjacent lower groups blurring into one
+another—mirroring the adjacent-group misclassifications in the LDA confusion
+matrix.
+
+## Which financial features differ
+
+```{r fig-profile, fig.cap="Standardised group means (z-scores) across income groups for one representative indicator per theoretical dimension. Credit, liquidity and access decline monotonically with income; the net interest margin is reversed (highest in low-income economies); stability (Z-score) is essentially flat.", fig.width=7, fig.height=4.2}
+ggplot(rep_means, aes(income, mean, colour = Dimension, group = Dimension)) +
+  geom_hline(yintercept = 0, colour = "grey80", linewidth = 0.3) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.3) +
+  scale_x_discrete(labels = inc_labels) +
+  scale_colour_brewer(palette = "Dark2") +
+  labs(x = "Income group", y = "Mean (standardised)", colour = NULL) +
+  theme_bw(base_size = 10) +
+  theme(legend.position = "right")
+```
+
+```{r tab-sub}
+sub_print <- rep_test |>
+  mutate(Dimension = gsub("\n", " ", Dimension),
+         F = sprintf("%.2f", F),
+         p = format.pval(p, digits = 2, eps = 1e-16))
+kable(sub_print, format = "latex", booktabs = TRUE, row.names = FALSE,
+      caption = "Univariate ANOVA by income group for one representative indicator per dimension.",
+      linesep = "") |>
+  kable_styling(latex_options = "hold_position", font_size = 10)
+```
+
+The representative-indicator profiles (Figure 2, Table 3) make the substantive
+story concrete. **Credit depth, liquidity and access** all decline
+monotonically from High- to Low-income economies (all $p < 10^{-3}$), the
+expected gradient. **Profitability**, proxied by the net interest margin, runs
+in the *opposite* direction—margins are widest in Low-income economies and
+narrowest in High-income ones ($p < 10^{-10}$)—reflecting less competitive,
+higher-spread banking systems at lower income levels. **Stability**, proxied by
+the bank Z-score, does *not* differ across income groups ($F =
+`r sprintf("%.2f", F_stab)`$, $p = `r sprintf("%.2f", p_stab)`$),
+reinforcing the factor-analysis finding that the stability indicators do not
+behave as a coherent, income-linked construct.
+
+# Conclusions
+
+MANOVA converts the descriptive separation seen in PCA and LDA into a formal
+result: income groups differ in financial structure far beyond chance (Pillai's
+$V = `r sprintf("%.2f", pillai)`$, $p < 10^{-10}$), with a large effect size.
+The difference is not uniform. It is carried by **financial depth and access**
+(PC1) and is essentially a **"High income vs.\ the rest"** contrast—adjacent
+lower-income groups are statistically indistinguishable, confirming that income
+maps onto a financial-development *continuum* rather than four discrete regimes.
+Substantively, depth, liquidity and access rise with income while interest
+margins fall, and **stability shows no income gradient at all**. Because Box's M
+rejects covariance homogeneity, these conclusions are anchored on Pillai's
+trace and are consistent with the preference for quadratic over linear
+discriminant analysis noted in the main report.
+
+\newpage
+
+# Appendix: R Code
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```

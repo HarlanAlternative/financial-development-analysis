@@ -7,11 +7,13 @@
 !analysis.Rmd
 !analysis.Rnw
 !factor-analysis.Rmd
+!manova-analysis.Rmd
 !references.bib
 
 # --- Compiled reports (build output, tracked on request) ---
 !analysis.pdf
 !factor-analysis.pdf
+!manova-analysis.pdf
 
 # --- Proposal folder: keep folder reachable, ignore contents, ---
 # --- then track only the exported proposal PDF (no data, no .docx). ---
